@@ -17,7 +17,7 @@ class Document
     #[ORM\Column(type: Types::BIGINT)]
     private ?string $product_id = null;
 
-    #[ORM\Column]
+    #[ORM\Column(type: Types::DATETIME_MUTABLE)]
     private ?\DateTime $report_date = null;
 
     #[ORM\Column(length: 255)]
