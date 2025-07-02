@@ -132,17 +132,20 @@ class DocumentDTO
     {
         $this->checkEmptyValues();
 
-        if ($this->type == DocumentType::INVENTORY->value) {
-            $this->balance = $this->balance ?: $this->value;
+        /** @var Document $lastDocument */
+        $lastDocument = $this->repository->getLastOneByProductIdAndReportDateLessOrderByReportDate($this->productId, $this->reportDate);
 
-            /** @var Document $lastDocument */
-            $lastDocument = $this->repository->getLastOneByProductIdOrderByReportDate($this->productId);
-
-            if (empty($lastDocument)) {
-                return;
-            }
-
-            $this->inventoryError = $this->balance - $lastDocument->getBalance();
+        switch ($this->type) {
+            case DocumentType::INVENTORY->value:
+                $this->balance = $this->value;
+                $this->inventoryError = $this->balance - ($lastDocument?->getBalance() ?? $this->balance);
+                break;
+            case DocumentType::INCOMING->value:
+                $this->balance = ($lastDocument?->getBalance() ?? 0) + $this->value;
+                break;
+            case DocumentType::OUTCOMING->value:
+                $this->balance = ($lastDocument?->getBalance() ?? 0) - $this->value;
+                break;
         }
     }
 
@@ -166,10 +169,6 @@ class DocumentDTO
 
         if (empty($this->value)) {
             throw new EmptyParameterValueException('empty value');
-        }
-
-        if (empty($this->balance) && $this->type !== DocumentType::INVENTORY->value) {
-            throw new EmptyParameterValueException('empty balance');
         }
     }
 

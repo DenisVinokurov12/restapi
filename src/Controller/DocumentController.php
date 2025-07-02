@@ -19,14 +19,20 @@ use Symfony\Component\Routing\Attribute\Route;
 final class DocumentController extends AbstractController
 {
 
+    public function __construct(
+        private readonly DocumentRepository $documentRepository,
+        private readonly EntityManagerInterface $entityManager,
+    )
+    {
+    }
+
     #[Route('/documents/analytic', name: 'get_document_analytic', methods: ['GET'])]
     public function getAnalyticByDate(
         #[MapQueryParameter] int $timestamp,
-        DocumentRepository $repository,
     ): JsonResponse
     {
         try {
-            $analyticData = $repository->getAnalyticsByDate((new \DateTime())->setTimestamp($timestamp));
+            $analyticData = $this->documentRepository->getAnalyticsByDate((new \DateTime())->setTimestamp($timestamp));
         } catch (\Exception $e) {
             return new JsonResponse([
                 'status' => false,
@@ -43,14 +49,12 @@ final class DocumentController extends AbstractController
     }
 
     #[Route('/documents/history', name: 'get_documents_history', methods: ['GET'])]
-    public function getHistory(
-        DocumentRepository $repository
-    ): JsonResponse
+    public function getHistory(): JsonResponse
     {
         $result = [];
 
         try {
-            $allDocuments = $repository->getAllOrderByProductIdAndReportDateAsc();
+            $allDocuments = $this->documentRepository->getAllOrderByProductIdAndReportDateAsc();
         } catch (\Exception $e) {
             return new JsonResponse([
                 'status' => false,
@@ -97,8 +101,6 @@ final class DocumentController extends AbstractController
     #[Route('/documents', name: 'create_document', methods: ['POST'])]
     public function createDocument(
         #[MapRequestPayload(type: DocumentDTO::class)] array $documentDtos,
-        EntityManagerInterface $entityManager,
-        DocumentRepository $documentRepository,
         LoggerInterface $logger,
         ObjectMapperInterface $objectMapper,
     ): JsonResponse
@@ -112,12 +114,14 @@ final class DocumentController extends AbstractController
         /** @var DocumentDTO $documentDto */
         foreach ($documentDtos as $documentDto) {
             try {
-                $documentDto->setRepository($documentRepository);
+                $documentDto->setRepository($this->documentRepository);
                 $documentDto->preprocess();
 
                 $document = $objectMapper->map($documentDto, Document::class);
-                $entityManager->persist($document);
-                $entityManager->flush();
+                $this->entityManager->persist($document);
+                $this->entityManager->flush();
+
+                $this->recalculateNextDocuments($document);
             } catch (EmptyParameterValueException $exception) {
                 $badRecords[] = [
                     'id' => $documentDto->getRequestId(),
@@ -145,6 +149,67 @@ final class DocumentController extends AbstractController
             'message' => !empty($badRecords) ? 'Data passed with errors' : 'Document created successfully',
             'data' => $badRecords,
         ]);
+    }
+
+    private function recalculateNextDocuments(Document $document): void
+    {
+        $existedDocuments = $this->documentRepository->getAllNextDocuments($document);
+
+        if (empty($existedDocuments)) {
+            return;
+        }
+
+        /** @var Document $existedDocument */
+        foreach ($existedDocuments as $existedDocument) {
+            switch ($document->getType()) {
+                case DocumentType::INCOMING->value:
+                    $this->addValue($existedDocument, $document->getValue());
+                    break;
+                case DocumentType::OUTCOMING->value:
+                    $this->addValue($existedDocument, -$document->getValue());
+                    break;
+                case DocumentType::INVENTORY->value:
+                    if (!isset($inventoryBalance)) {
+                        $inventoryBalance = $document->getBalance();
+                    }
+
+                    $inventoryBalance = $this->recalculateBalanceOrInventoryError($existedDocument, $inventoryBalance);
+            }
+
+            $this->entityManager->persist($existedDocument);
+            $this->entityManager->flush();
+
+            if ($existedDocument->getType() === DocumentType::INVENTORY->value) {
+                return;
+            }
+        }
+    }
+
+    private function addValue(Document $document, int $value): void
+    {
+        if ($document->getType() === DocumentType::INVENTORY->value) {
+            $document->setInventoryError($document->getInventoryError() - $value);
+
+            return;
+        }
+
+        $document->setBalance($document->getBalance() + $value);
+    }
+
+    private function recalculateBalanceOrInventoryError(Document $document, int $inventoryBalance): int
+    {
+        switch ($document->getType()) {
+            case DocumentType::INCOMING->value:
+                $document->setBalance($inventoryBalance + $document->getValue());
+                break;
+            case DocumentType::OUTCOMING->value:
+                $document->setBalance($inventoryBalance - $document->getValue());
+                break;
+            case DocumentType::INVENTORY->value:
+                $document->setInventoryError($document->getBalance() - $inventoryBalance);
+        }
+
+        return $document->getBalance();
     }
 
 }
